@@ -23,7 +23,7 @@ RUN a2enmod rewrite
 WORKDIR /var/www/html
 
 # Copiar el contenido del proyecto
-COPY src/ .
+COPY . .
 
 # Instalar dependencias PHP
 RUN composer install --no-dev --optimize-autoloader --no-interaction
