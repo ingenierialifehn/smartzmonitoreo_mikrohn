@@ -14,9 +14,9 @@ class RouterOsService
     private $socket = null;
     public bool $connected = false;
     public int $port = 8728;
-    public float $timeout = 2.0;
-    public float $connectTimeout = 1.5;
-    public int $attempts = 1;
+    public float $timeout = 2.5;
+    public float $connectTimeout = 2.0;
+    public int $attempts = 2;
     public ?string $errorStr = null;
     public ?int $errorNo = null;
 

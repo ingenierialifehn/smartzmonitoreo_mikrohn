@@ -218,14 +218,12 @@
                           x-text="routerOnline ? 'ONLINE' : 'OFFLINE'">
                     </span>
                 </div>
-                <div class="flex items-baseline justify-between mt-2">
-                    <div>
-                        <h2 class="text-xl font-black font-mono"
-                            :class="routerOnline ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'"
-                            x-text="routerOnline ? 'EN LÍNEA' : 'SIN RESPUESTA'">
-                        </h2>
-                        <div class="text-xs text-slate-500 dark:text-slate-400 font-mono mt-0.5" x-text="activeRouter?.ip || '0.0.0.0'"></div>
-                    </div>
+                <h2 class="text-xl font-black mt-2 font-mono"
+                    :class="routerOnline ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'"
+                    x-text="routerOnline ? 'EN LÍNEA' : 'SIN RESPUESTA'">
+                </h2>
+                <div class="flex items-baseline justify-between mt-1">
+                    <div class="text-xs text-slate-500 dark:text-slate-400 font-mono mt-0.5" x-text="activeRouter?.ip || '0.0.0.0'"></div>
                     <div class="text-right font-mono">
                         <div class="text-xs text-slate-500 dark:text-slate-400">Latencia</div>
                         <div class="text-sm font-bold text-cyan-600 dark:text-noc-cyan" x-text="pingMs !== null ? `${pingMs}ms` : '--'"></div>
@@ -972,6 +970,7 @@ function nocDashboard() {
         activeRouterOnline: true,
         estadoAnteriorOnline: true,
         contadorFallos: 0,
+        isFetchingMetrics: false,
 
         // State Tracking for Real-time Incident Alerts
         cpuAlertCooldown: false,
@@ -1228,7 +1227,8 @@ function nocDashboard() {
         },
 
         async fetchMetrics(isManual = false) {
-            if (!this.activeRouter || this.loading) return;
+            if (!this.activeRouter || this.isFetchingMetrics) return;
+            this.isFetchingMetrics = true;
             if (isManual) this.loading = true;
 
             try {
@@ -1341,7 +1341,7 @@ function nocDashboard() {
                     } else {
                         // Router respondió pero con online = false
                         this.contadorFallos++;
-                        // Solo disparar alarma acústica y Toast si el estado anterior era true (transición real de caída)
+                        // Solo disparar alarma acústica y Toast si this.routerOnline === false Y el estado anterior era true (transición real de caída)
                         if (this.estadoAnteriorOnline === true) {
                             this.estadoAnteriorOnline = false;
                             this.estadoPrevioRouter = 'OFFLINE';
@@ -1351,16 +1351,18 @@ function nocDashboard() {
                 } else {
                     // Fallo al obtener respuesta JSON o respuesta inválida
                     this.contadorFallos++;
-                    this.routerOnline = false;
-                    this.activeRouterOnline = false;
-                    const rName = this.activeRouter?.nombre || 'Router';
-                    const rIp = this.activeRouter?.ip || '';
+                    if (this.contadorFallos >= 2) {
+                        this.routerOnline = false;
+                        this.activeRouterOnline = false;
+                        const rName = this.activeRouter?.nombre || 'Router';
+                        const rIp = this.activeRouter?.ip || '';
 
-                    // Solo disparar si la transición anterior era true
-                    if (this.estadoAnteriorOnline === true) {
-                        this.estadoAnteriorOnline = false;
-                        this.estadoPrevioRouter = 'OFFLINE';
-                        this.dispararAlertaNoc('Alarma NOC', `Router ${rName} (${rIp}) no responde al sondeo.`, 'error');
+                        // Solo disparar la alarma acústica y el Toast si this.routerOnline === false Y el estado anterior era true (transición de caída real)
+                        if (this.estadoAnteriorOnline === true) {
+                            this.estadoAnteriorOnline = false;
+                            this.estadoPrevioRouter = 'OFFLINE';
+                            this.dispararAlertaNoc('Alarma NOC', `Router ${rName} (${rIp}) no responde al sondeo.`, 'error');
+                        }
                     }
                 }
 
@@ -1372,17 +1374,20 @@ function nocDashboard() {
             } catch (err) {
                 console.warn('Error general en ciclo de métricas:', err);
                 this.contadorFallos++;
-                this.routerOnline = false;
-                this.activeRouterOnline = false;
-                const rName = this.activeRouter?.nombre || 'Router';
-                const rIp = this.activeRouter?.ip || '';
+                if (this.contadorFallos >= 2) {
+                    this.routerOnline = false;
+                    this.activeRouterOnline = false;
+                    const rName = this.activeRouter?.nombre || 'Router';
+                    const rIp = this.activeRouter?.ip || '';
 
-                if (this.estadoAnteriorOnline === true) {
-                    this.estadoAnteriorOnline = false;
-                    this.estadoPrevioRouter = 'OFFLINE';
-                    this.dispararAlertaNoc('Alarma NOC', `Router ${rName} (${rIp}) no responde al sondeo.`, 'error');
+                    if (this.estadoAnteriorOnline === true) {
+                        this.estadoAnteriorOnline = false;
+                        this.estadoPrevioRouter = 'OFFLINE';
+                        this.dispararAlertaNoc('Alarma NOC', `Router ${rName} (${rIp}) no responde al sondeo.`, 'error');
+                    }
                 }
             } finally {
+                this.isFetchingMetrics = false;
                 if (isManual) this.loading = false;
             }
         },

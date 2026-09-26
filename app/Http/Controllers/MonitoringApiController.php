@@ -43,16 +43,14 @@ class MonitoringApiController extends Controller
         $enLinea = false;
 
         // Si ya se obtuvieron recursos del hardware por la API de MikroTik, está estrictamente en línea
-        if (!empty($resources) && (isset($resources['uptime']) || (isset($resources['online']) && $resources['online'] === true)) && empty($resources['error'])) {
+        if (!empty($resources) && (isset($resources['uptime']) || !empty($resources['online']))) {
             $enLinea = true;
         } elseif (!empty($health) && !empty($health['supported'])) {
             $enLinea = true;
-        } elseif ($this->routerOs->connected) {
-            $enLinea = true;
         } else {
-            // Si no hay datos previos, intentar verificación directa por socket API (puerto 8728)
+            // Si no hay datos previos, intentar verificación directa por socket API (8728)
             try {
-                $targetHost = $router->ip_limpia ?? $router->ip;
+                $targetHost = $router->ip_host ?? $router->ip_limpia ?? $router->ip;
                 $targetPort = $router->puerto_api ?? 8728;
                 $socket = @fsockopen($targetHost, $targetPort, $errno, $errstr, 2);
                 if ($socket) {
