@@ -5,10 +5,11 @@
 @section('content')
 <div class="min-h-screen flex items-center justify-center p-4 relative overflow-hidden bg-slate-50 dark:bg-gradient-to-br dark:from-noc-950 dark:via-noc-900 dark:to-noc-950 transition-colors duration-200"
      x-data="{
-        usuario: '',
+        usuario: '{{ old('usuario', '') }}',
         password: '',
         remember: true,
         loading: false,
+        serverError: '',
         theme: localStorage.getItem('smartz_theme') || 'light',
         toggleTheme() {
             this.theme = this.theme === 'dark' ? 'light' : 'dark';
@@ -29,13 +30,20 @@
                 return;
             }
             this.loading = true;
+            this.serverError = '';
+
             try {
-                const response = await fetch('{{ route('login.post') }}', {
+                const csrfMeta = document.querySelector('meta[name=csrf-token]');
+                const csrfInput = document.querySelector('input[name=_token]');
+                const token = csrfMeta ? csrfMeta.content : (csrfInput ? csrfInput.value : '');
+
+                // Ruta relativa estricta /login: previene Mixed Content y bloqueos CORS en HTTPS (Render)
+                const response = await fetch('/login', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         'Accept': 'application/json',
-                        'X-CSRF-TOKEN': document.querySelector('meta[name=csrf-token]').content
+                        'X-CSRF-TOKEN': token
                     },
                     body: JSON.stringify({
                         usuario: this.usuario,
@@ -44,28 +52,56 @@
                     })
                 });
 
-                const data = await response.json();
+                let data = null;
+                try {
+                    data = await response.json();
+                } catch (parseErr) {
+                    console.warn('Respuesta no JSON recibida del servidor:', parseErr);
+                }
 
-                if (response.ok && data.success) {
-                    // Redirección inmediata sin esperas artificiales
-                    window.location.href = data.redirect || '{{ route('dashboard') }}';
+                if (response.ok && data && data.success) {
+                    // Redirección inmediata a dashboard
+                    window.location.href = data.redirect || '/dashboard';
                     return;
                 } else {
+                    let errorMsg = data ? data.message : null;
+                    if (!errorMsg) {
+                        if (response.status === 500) {
+                            errorMsg = 'Error interno del servidor (500). Verifique las credenciales de Base de Datos MySQL en Render.';
+                        } else if (response.status === 419) {
+                            errorMsg = 'El token de seguridad CSRF ha expirado. Por favor recargue la página.';
+                        } else if (response.status === 404) {
+                            errorMsg = 'Ruta de autenticación no encontrada (404).';
+                        } else {
+                            errorMsg = 'Credenciales inválidas en base de datos MikroHN.';
+                        }
+                    }
+
+                    this.serverError = errorMsg;
                     window.nocToast({
                         type: 'error',
-                        title: 'Fallo de Autenticación',
-                        message: data.message || 'Credenciales inválidas en base de datos MikroHN.'
+                        title: response.status >= 500 ? 'Error de Servidor / Base de Datos' : 'Fallo de Autenticación',
+                        message: errorMsg
                     });
                     this.loading = false;
                 }
             } catch (err) {
-                console.error(err);
+                console.error('Fetch error:', err);
+                this.serverError = 'No fue posible comunicar con el servidor por AJAX. Intentando envío tradicional directo...';
                 window.nocToast({
                     type: 'error',
-                    title: 'Error de Red / Servidor',
-                    message: 'No fue posible comunicar con el servidor de autenticación.'
+                    title: 'Fallo de Conexión Asíncrona',
+                    message: 'Reintentando autenticación mediante envío de formulario estándar...'
                 });
-                this.loading = false;
+
+                // Fallback automático nativo por formulario
+                setTimeout(() => {
+                    if (this.$refs.loginForm) {
+                        this.$refs.loginForm.submit();
+                    } else {
+                        this.loading = false;
+                    }
+                }, 800);
             }
         }
      }">
@@ -119,15 +155,45 @@
                 <p class="text-sm text-slate-500 dark:text-slate-400 mt-0.5">Use sus credenciales de usuario registrado</p>
             </div>
 
-            <form @submit.prevent="submitLogin()" class="space-y-5">
+            <!-- Alerta de Errores de Validación Nativos de Laravel -->
+            @if ($errors->any())
+                <div class="mb-5 p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-700 dark:text-rose-400 text-xs flex items-start gap-2.5">
+                    <i class="fa-solid fa-circle-exclamation text-rose-600 dark:text-rose-400 mt-0.5 text-sm flex-shrink-0"></i>
+                    <div>
+                        <div class="font-bold mb-0.5">Fallo de Autenticación / Conexión</div>
+                        <ul class="list-disc list-inside space-y-0.5">
+                            @foreach ($errors->all() as $error)
+                                <li>{{ $error }}</li>
+                            @endforeach
+                        </ul>
+                    </div>
+                </div>
+            @endif
+
+            <!-- Mensaje reactivo de error asíncrono o base de datos -->
+            <div x-show="serverError" x-cloak class="mb-5 p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-800 dark:text-amber-300 text-xs flex items-start gap-2.5">
+                <i class="fa-solid fa-triangle-exclamation text-amber-600 dark:text-amber-400 mt-0.5 text-sm flex-shrink-0"></i>
+                <div x-text="serverError"></div>
+            </div>
+
+            <form x-ref="loginForm"
+                  method="POST"
+                  action="{{ route('login.post') }}"
+                  @submit.prevent="submitLogin()"
+                  class="space-y-5">
+                @csrf
+
                 <!-- Field: Usuario / Email -->
                 <div>
-                    <label class="block text-xs font-mono text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-2">
+                    <label for="usuario" class="block text-xs font-mono text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-2">
                         <i class="fa-solid fa-user-shield text-cyan-600 dark:text-noc-cyan mr-1.5"></i> Usuario o Correo
                     </label>
                     <div class="relative">
-                        <input type="text"
+                        <input id="usuario"
+                               type="text"
+                               name="usuario"
                                x-model="usuario"
+                               value="{{ old('usuario') }}"
                                autofocus
                                required
                                placeholder="Ej: admin o usuario@red.hn"
@@ -137,11 +203,13 @@
 
                 <!-- Field: Password -->
                 <div>
-                    <label class="block text-xs font-mono text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-2">
+                    <label for="password" class="block text-xs font-mono text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-2">
                         <i class="fa-solid fa-key text-emerald-600 dark:text-noc-neon mr-1.5"></i> Contraseña
                     </label>
                     <div class="relative">
-                        <input type="password"
+                        <input id="password"
+                               type="password"
+                               name="password"
                                x-model="password"
                                required
                                placeholder="••••••••••••"
@@ -152,7 +220,11 @@
                 <!-- Remember Me & Info -->
                 <div class="flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
                     <label class="flex items-center gap-2 cursor-pointer select-none">
-                        <input type="checkbox" x-model="remember" class="rounded border-slate-300 dark:border-slate-700 bg-white dark:bg-noc-900 text-cyan-600 dark:text-noc-cyan focus:ring-0">
+                        <input type="checkbox"
+                               name="remember"
+                               value="1"
+                               x-model="remember"
+                               class="rounded border-slate-300 dark:border-slate-700 bg-white dark:bg-noc-900 text-cyan-600 dark:text-noc-cyan focus:ring-0">
                         <span>Recordar sesión</span>
                     </label>
                     <span class="font-mono text-[11px] text-slate-500">Bcrypt v12</span>
@@ -162,16 +234,12 @@
                 <button type="submit"
                         :disabled="loading"
                         class="w-full relative group overflow-hidden bg-gradient-to-r from-cyan-600 via-teal-600 to-emerald-600 hover:from-cyan-500 hover:to-emerald-500 text-white font-bold py-3.5 px-6 rounded-xl transition-all duration-200 transform active:scale-98 shadow-md hover:shadow-lg flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed">
-                    <template x-if="!loading">
-                        <span class="flex items-center gap-2 text-sm tracking-wider uppercase font-extrabold">
-                            <i class="fa-solid fa-bolt-lightning"></i> Iniciar Monitoreo
-                        </span>
-                    </template>
-                    <template x-if="loading">
-                        <span class="flex items-center gap-2 text-sm tracking-wider uppercase font-extrabold">
-                            <i class="fa-solid fa-circle-notch fa-spin"></i> Autenticando...
-                        </span>
-                    </template>
+                    <span x-show="!loading" class="flex items-center gap-2 text-sm tracking-wider uppercase font-extrabold">
+                        <i class="fa-solid fa-bolt-lightning"></i> Iniciar Monitoreo
+                    </span>
+                    <span x-show="loading" x-cloak class="flex items-center gap-2 text-sm tracking-wider uppercase font-extrabold">
+                        <i class="fa-solid fa-circle-notch fa-spin"></i> Autenticando...
+                    </span>
                 </button>
             </form>
 

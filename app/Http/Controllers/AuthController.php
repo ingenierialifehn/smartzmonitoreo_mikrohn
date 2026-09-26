@@ -12,8 +12,12 @@ class AuthController extends Controller
 {
     public function showLogin()
     {
-        if (Auth::check()) {
-            return redirect()->route('dashboard');
+        try {
+            if (Auth::check()) {
+                return redirect()->route('dashboard');
+            }
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('No se pudo verificar Auth::check() en showLogin: ' . $e->getMessage());
         }
         return view('auth.login');
     }
@@ -31,10 +35,29 @@ class AuthController extends Controller
 
         // 1. LOGIN INSTANTÁNEO: Autenticación 100% puramente local en MySQL contra tabla 'users'
         // NINGUNA conexión a MikroTik ni socket API debe ejecutarse durante el ciclo de vida del request HTTP de login.
-        $user = User::select('id', 'name', 'usuario', 'email', 'password', 'status')
-                    ->where('usuario', $usuarioInput)
-                    ->orWhere('email', $usuarioInput)
-                    ->first();
+        try {
+            $user = User::select('id', 'name', 'usuario', 'email', 'password', 'status')
+                        ->where('usuario', $usuarioInput)
+                        ->orWhere('email', $usuarioInput)
+                        ->first();
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Fallo de conexión MySQL en AuthController@login: ' . $e->getMessage());
+
+            $dbErrorMessage = config('app.debug')
+                ? 'Error de conexión MySQL: ' . $e->getMessage()
+                : 'No fue posible conectar con la Base de Datos MySQL. Verifique las variables de entorno DB_HOST, DB_DATABASE, DB_USERNAME y DB_PASSWORD en el panel de Render.';
+
+            if ($request->wantsJson()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => $dbErrorMessage
+                ], 500);
+            }
+
+            throw ValidationException::withMessages([
+                'usuario' => $dbErrorMessage,
+            ]);
+        }
 
         if (!$user) {
             if ($request->wantsJson()) {
