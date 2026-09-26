@@ -37,24 +37,26 @@
                 </button>
             </div>
 
-            <!-- Selector Desplegable -->
-            <div class="relative min-w-[260px]">
+            <!-- Selector Desplegable con Botón de Actualizar Integrado -->
+            <div class="flex items-center gap-1.5 min-w-[260px] flex-1">
                 <select x-model="clienteSeleccionadoId" 
                         @change="cambiarCliente()"
-                        class="w-full text-xs rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-noc-950 text-slate-800 dark:text-slate-200 p-2.5 focus:ring-1 focus:ring-cyan-500 dark:focus:ring-noc-cyan focus:outline-none font-mono cursor-pointer shadow-sm">
+                        class="w-full text-xs rounded-xl border border-gray-300 dark:border-slate-600 bg-gray-50 dark:bg-slate-900 text-gray-800 dark:text-gray-200 p-2.5 focus:ring-cyan-500 font-mono">
                     <option value="">-- Seleccionar Cliente para Monitorear --</option>
-                    <template x-for="c in clientesFiltrados" :key="c.id">
+                    <template x-for="c in (filtroBusqueda ? clientesFiltrados : listaClientes)" :key="c.id">
                         <option :value="c.id" x-text="`${c.nombre} (${c.ip})`"></option>
                     </template>
                 </select>
+                
+                <button type="button" 
+                        @click="cargarClientes()" 
+                        class="p-2.5 text-gray-500 hover:text-cyan-600 bg-gray-100 dark:bg-slate-800 hover:bg-gray-200 rounded-xl transition flex-shrink-0" 
+                        title="Actualizar lista de clientes">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                </button>
             </div>
-
-            <!-- Botón de Refresco de Clientes -->
-            <button @click="cargarClientes()" 
-                    title="Recargar lista de clientes"
-                    class="w-9 h-9 rounded-xl bg-slate-100 dark:bg-noc-850 hover:bg-slate-200 dark:hover:bg-noc-800 border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 flex items-center justify-center text-xs transition-all shadow-sm">
-                <i class="fa-solid fa-arrows-rotate"></i>
-            </button>
         </div>
     </div>
 

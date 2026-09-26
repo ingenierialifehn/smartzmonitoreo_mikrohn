@@ -1652,6 +1652,7 @@ function nocDashboard() {
  */
 function monitorClienteComponent() {
     return {
+        routerActivoId: '{{ $defaultRouter->id ?? '' }}',
         clienteSeleccionadoId: '',
         clienteActual: {},
         listaClientes: [],
@@ -1669,12 +1670,21 @@ function monitorClienteComponent() {
         },
 
         init() {
+            // Sincronizar router inicial si existe en nocDashboard o en el select
+            const mainRouterSelect = document.querySelector('[x-model="selectedRouterId"]');
+            if (mainRouterSelect && mainRouterSelect.value) {
+                this.routerActivoId = mainRouterSelect.value;
+            }
+
             // Cargar listado de clientes del router activo
             this.cargarClientes();
 
             // Escuchar cambios de router global
             window.addEventListener('router-changed', (e) => {
-                this.cargarClientes(e.detail?.routerId);
+                if (e.detail?.routerId) {
+                    this.routerActivoId = e.detail.routerId;
+                }
+                this.cargarClientes();
             });
 
             // Listener de cambio de tema
@@ -1690,19 +1700,19 @@ function monitorClienteComponent() {
             };
         },
 
-        cargarClientes(routerId = null) {
-            const url = routerId 
-                ? `/api/monitoreo/clientes-activos?router_id=${routerId}`
-                : '/api/monitoreo/clientes-activos';
-            fetch(url)
+        cargarClientes() {
+            const routerId = this.routerActivoId || '';
+            fetch(`/api/monitoreo/clientes-activos?router_id=${routerId}`, { cache: 'no-store' })
                 .then(r => r.json())
-                .then(data => { 
-                    this.listaClientes = data.clientes || []; 
-                    if (this.clienteSeleccionadoId && !this.listaClientes.some(c => c.id == this.clienteSeleccionadoId)) {
-                        this.limpiarMonitoreo();
+                .then(data => {
+                    if (data.success) {
+                        this.listaClientes = data.clientes || [];
+                        if (this.clienteSeleccionadoId && !this.listaClientes.some(c => c.id == this.clienteSeleccionadoId)) {
+                            this.limpiarMonitoreo();
+                        }
                     }
                 })
-                .catch(e => console.error('Error cargando clientes:', e));
+                .catch(err => console.error('Error al cargar lista:', err));
         },
 
         get clientesFiltrados() {
