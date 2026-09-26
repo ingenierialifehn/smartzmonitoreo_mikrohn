@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Router;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -331,6 +332,232 @@ class RouterOsService
             'rx_mbps' => 0,
             'tx_mbps' => 0,
         ];
+    }
+
+    /**
+     * Monitorea consumo de ancho de banda individual por cliente en tiempo real
+     * Soporta Caso A (Simple Queue con rate y delta de bytes) y Caso B (PCQ / Mangle)
+     */
+    public function getClientTraffic(Router $router, mixed $clienteOrIp): array
+    {
+        $ip = is_object($clienteOrIp) ? ($clienteOrIp->ip_address ?? '') : (is_array($clienteOrIp) ? ($clienteOrIp['ip'] ?? $clienteOrIp['ip_address'] ?? '') : (string)$clienteOrIp);
+        $clienteId = is_object($clienteOrIp) ? ($clienteOrIp->id ?? $ip) : (is_array($clienteOrIp) ? ($clienteOrIp['id'] ?? $ip) : $ip);
+
+        $ip = trim((string)$ip);
+
+        if (empty($ip)) {
+            return [
+                'success' => false,
+                'online' => false,
+                'error' => 'IP de cliente no especificada',
+                'download_mbps' => 0.0,
+                'upload_mbps' => 0.0,
+                'download_formateado' => '0 bps',
+                'upload_formateado' => '0 bps',
+                'bytes_rx' => 0,
+                'bytes_tx' => 0,
+                'bytes_rx_formateado' => '0 B',
+                'bytes_tx_formateado' => '0 B',
+            ];
+        }
+
+        if (!$this->connectRouter($router)) {
+            return [
+                'success' => false,
+                'online' => false,
+                'error' => 'No se pudo conectar al Router MikroTik: ' . ($this->errorStr ?: 'Timeout'),
+                'download_mbps' => 0.0,
+                'upload_mbps' => 0.0,
+                'download_formateado' => '0 bps',
+                'upload_formateado' => '0 bps',
+                'bytes_rx' => 0,
+                'bytes_tx' => 0,
+                'bytes_rx_formateado' => '0 B',
+                'bytes_tx_formateado' => '0 B',
+            ];
+        }
+
+        $dwBps = 0.0;
+        $upBps = 0.0;
+        $dwBytes = 0;
+        $upBytes = 0;
+        $matchedQueue = null;
+
+        // =========================================================================
+        // Caso A: Simple Queue
+        // =========================================================================
+        $targetWithMask = str_contains($ip, '/') ? $ip : ($ip . '/32');
+        $queues = $this->comm('/queue/simple/print');
+
+        if (!empty($queues)) {
+            foreach ($queues as $q) {
+                $target = $q['target'] ?? '';
+                $name = $q['name'] ?? '';
+
+                // Prioridad 1: Coincidencia exacta con la IP/32 o IP
+                if ($target === $targetWithMask || $target === $ip) {
+                    $matchedQueue = $q;
+                    break;
+                }
+
+                // Prioridad 2: Nombre de servicio con el ID del cliente (ej. Servicio_1_jose)
+                if (is_numeric($clienteId) && preg_match('/^Servicio_' . $clienteId . '_/i', $name)) {
+                    $matchedQueue = $q;
+                    break;
+                }
+
+                // Prioridad 3: Contiene la IP y no es una cola padre
+                if (str_contains($target, $ip) && !str_starts_with($name, 'PADRE_')) {
+                    $matchedQueue = $q;
+                }
+            }
+        }
+
+        if ($matchedQueue) {
+            // En MikroTik Simple Queue: rate = upload/download (bps)
+            $rateStr = $matchedQueue['rate'] ?? '0/0';
+            $rateParts = explode('/', $rateStr);
+            $upBps = isset($rateParts[0]) ? (float)$rateParts[0] : 0.0;
+            $dwBps = isset($rateParts[1]) ? (float)$rateParts[1] : 0.0;
+
+            // bytes = upload/download (bytes)
+            $bytesStr = $matchedQueue['bytes'] ?? '0/0';
+            $byteParts = explode('/', $bytesStr);
+            $upBytes = isset($byteParts[0]) ? (int)$byteParts[0] : 0;
+            $dwBytes = isset($byteParts[1]) ? (int)$byteParts[1] : 0;
+
+            // Diferencia de bytes entre intervalos para cálculo preciso en tiempo real
+            $cacheKey = "client_traffic_sq_{$router->id}_{$clienteId}";
+            $now = microtime(true);
+            $prev = Cache::get($cacheKey);
+
+            if ($prev && isset($prev['time'], $prev['upBytes'], $prev['dwBytes'])) {
+                $elapsed = $now - $prev['time'];
+                if ($elapsed > 0.4 && $elapsed < 30) {
+                    $diffUp = max(0, $upBytes - $prev['upBytes']);
+                    $diffDw = max(0, $dwBytes - $prev['dwBytes']);
+
+                    $calcUpBps = ($diffUp * 8) / $elapsed;
+                    $calcDwBps = ($diffDw * 8) / $elapsed;
+
+                    // Si MikroTik reportó 0/0 en print estático o el cálculo por delta es mayor
+                    if ($upBps == 0 || $calcUpBps > 0) {
+                        $upBps = max($upBps, $calcUpBps);
+                    }
+                    if ($dwBps == 0 || $calcDwBps > 0) {
+                        $dwBps = max($dwBps, $calcDwBps);
+                    }
+                }
+            }
+
+            Cache::put($cacheKey, [
+                'time' => $now,
+                'upBytes' => $upBytes,
+                'dwBytes' => $dwBytes,
+            ], 60);
+        } else {
+            // =====================================================================
+            // Caso B: PCQ / Mangle o Connections
+            // =====================================================================
+            $mangleRules = $this->comm('/ip/firewall/mangle/print');
+            $foundMangle = false;
+
+            if (!empty($mangleRules)) {
+                foreach ($mangleRules as $rule) {
+                    $comment = $rule['comment'] ?? '';
+                    $src = $rule['src-address'] ?? '';
+                    $dst = $rule['dst-address'] ?? '';
+                    $b = isset($rule['bytes']) ? (int)$rule['bytes'] : 0;
+
+                    if (str_contains($comment, $ip) || str_contains($src, $ip) || str_contains($dst, $ip)) {
+                        $foundMangle = true;
+                        $mark = strtolower($rule['new-packet-mark'] ?? '');
+                        $commLower = strtolower($comment);
+
+                        if (str_contains($dst, $ip) || str_contains($commLower, 'dw') || str_contains($commLower, 'descarga') || str_contains($mark, 'dw')) {
+                            $dwBytes += $b;
+                        } elseif (str_contains($src, $ip) || str_contains($commLower, 'up') || str_contains($commLower, 'subida') || str_contains($mark, 'up')) {
+                            $upBytes += $b;
+                        } else {
+                            $dwBytes += $b;
+                        }
+                    }
+                }
+            }
+
+            if ($foundMangle) {
+                $cacheKey = "client_traffic_mangle_{$router->id}_{$clienteId}";
+                $now = microtime(true);
+                $prev = Cache::get($cacheKey);
+
+                if ($prev && isset($prev['time'], $prev['upBytes'], $prev['dwBytes'])) {
+                    $elapsed = $now - $prev['time'];
+                    if ($elapsed > 0.4 && $elapsed < 30) {
+                        $diffUp = max(0, $upBytes - $prev['upBytes']);
+                        $diffDw = max(0, $dwBytes - $prev['dwBytes']);
+
+                        $upBps = ($diffUp * 8) / $elapsed;
+                        $dwBps = ($diffDw * 8) / $elapsed;
+                    }
+                }
+
+                Cache::put($cacheKey, [
+                    'time' => $now,
+                    'upBytes' => $upBytes,
+                    'dwBytes' => $dwBytes,
+                ], 60);
+            }
+        }
+
+        $this->disconnect();
+
+        $dwMbps = round($dwBps / 1000000, 2);
+        $upMbps = round($upBps / 1000000, 2);
+
+        return [
+            'success' => true,
+            'online' => true,
+            'download_mbps' => $dwMbps,
+            'upload_mbps' => $upMbps,
+            'download_formateado' => $this->formatBps($dwBps),
+            'upload_formateado' => $this->formatBps($upBps),
+            'download_bps' => round($dwBps),
+            'upload_bps' => round($upBps),
+            'bytes_rx' => $dwBytes,
+            'bytes_tx' => $upBytes,
+            'bytes_rx_formateado' => $this->formatBytes($dwBytes),
+            'bytes_tx_formateado' => $this->formatBytes($upBytes),
+            'queue_name' => $matchedQueue['name'] ?? null,
+            'timestamp' => now()->format('H:i:s'),
+        ];
+    }
+
+    /**
+     * Formatea tasa en bps a unidad legible (bps, Kbps, Mbps)
+     */
+    public function formatBps(float $bps): string
+    {
+        if ($bps >= 1000000) {
+            return number_format($bps / 1000000, 2) . ' Mbps';
+        } elseif ($bps >= 1000) {
+            return number_format($bps / 1000, 1) . ' Kbps';
+        }
+        return round($bps) . ' bps';
+    }
+
+    /**
+     * Formatea bytes a unidad legible (B, KB, MB, GB)
+     */
+    public function formatBytes(float $bytes): string
+    {
+        if ($bytes >= 1073741824) {
+            return number_format($bytes / 1073741824, 2) . ' GB';
+        } elseif ($bytes >= 1048576) {
+            return number_format($bytes / 1048576, 2) . ' MB';
+        } elseif ($bytes >= 1024) {
+            return number_format($bytes / 1024, 1) . ' KB';
+        }
+        return round($bytes) . ' B';
     }
 
     /**

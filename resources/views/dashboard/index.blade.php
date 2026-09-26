@@ -256,7 +256,9 @@
                 </div>
                 <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-800/80 flex items-center justify-between text-[11px] font-mono text-slate-500 dark:text-slate-400">
                     <span>Base de Datos: <strong class="text-emerald-600 dark:text-noc-neon">mikrohn</strong></span>
-                    <span class="text-slate-500 dark:text-slate-400">Modo: <strong class="text-slate-700 dark:text-slate-300">Lectura Directa</strong></span>
+                    <button @click="currentTab = 'client_traffic'" class="text-cyan-600 dark:text-noc-cyan hover:underline flex items-center gap-1 cursor-pointer font-bold">
+                        <i class="fa-solid fa-users text-[10px]"></i> Clientes
+                    </button>
                 </div>
             </div>
 
@@ -361,6 +363,11 @@
                         :class="currentTab === 'traffic' ? 'border-cyan-600 dark:border-noc-cyan text-cyan-700 dark:text-noc-cyan font-bold bg-cyan-50/70 dark:bg-noc-900/60 shadow-sm' : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:border-slate-300 dark:hover:border-slate-700'"
                         class="px-4 py-2.5 rounded-t-xl text-xs sm:text-sm font-mono uppercase tracking-wider border-b-2 flex items-center gap-2 whitespace-nowrap transition-all">
                     <i class="fa-solid fa-chart-area"></i> Gráficos de Tráfico (TX / RX)
+                </button>
+                <button @click="currentTab = 'client_traffic'; $nextTick(() => { if (window.clientMonitorChart) window.clientMonitorChart.resize(); })" 
+                        :class="currentTab === 'client_traffic' ? 'border-cyan-600 dark:border-noc-cyan text-cyan-700 dark:text-noc-cyan font-bold bg-cyan-50/70 dark:bg-noc-900/60 shadow-sm' : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:border-slate-300 dark:hover:border-slate-700'"
+                        class="px-4 py-2.5 rounded-t-xl text-xs sm:text-sm font-mono uppercase tracking-wider border-b-2 flex items-center gap-2 whitespace-nowrap transition-all">
+                    <i class="fa-solid fa-users text-cyan-600 dark:text-noc-cyan"></i> Tráfico por Cliente (En Vivo)
                 </button>
                 <button @click="currentTab = 'logs'" 
                         :class="currentTab === 'logs' ? 'border-cyan-600 dark:border-noc-cyan text-cyan-700 dark:text-noc-cyan font-bold bg-cyan-50/70 dark:bg-noc-900/60 shadow-sm' : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:border-slate-300 dark:hover:border-slate-700'"
@@ -858,6 +865,11 @@
 
         </div>
 
+        <!-- 🎯 TAB: MONITOR DE CONSUMO INDIVIDUAL POR CLIENTE EN TIEMPO REAL -->
+        <div x-show="currentTab === 'client_traffic'" x-transition:enter="transition ease-out duration-200" class="space-y-6">
+            @include('dashboard.partials.cliente_monitor')
+        </div>
+
     </main>
 
     <!-- Footer (Full Width Responsive - Cleaned Text) -->
@@ -899,6 +911,7 @@ function nocDashboard() {
                 document.documentElement.classList.remove('dark');
             }
             this.updateChartTheme();
+            if (window.clientMonitorUpdateTheme) window.clientMonitorUpdateTheme();
         },
 
         // Web Audio API Beep Generator
@@ -1135,6 +1148,8 @@ function nocDashboard() {
         async changeRouter() {
             this.activeRouter = this.routersList.find(r => r.id == this.selectedRouterId) || null;
             if (!this.activeRouter) return;
+
+            window.dispatchEvent(new CustomEvent('router-changed', { detail: { routerId: this.selectedRouterId } }));
 
             // Sincronizar estado inicial al conmutar router
             this.routerOnline = true;
@@ -1631,5 +1646,232 @@ function nocDashboard() {
         }
     }
 }
+
+/**
+ * Controlador Reactivo para el Monitoreo Individual de Tráfico por Cliente en Vivo (Alpine.js + Chart.js)
+ */
+function monitorClienteComponent() {
+    return {
+        clienteSeleccionadoId: '',
+        clienteActual: {},
+        listaClientes: [],
+        filtroBusqueda: '',
+        intervalo: null,
+        chart: null,
+        traficoActual: { 
+            download_formateado: '0 bps', 
+            upload_formateado: '0 bps',
+            download_mbps: 0,
+            upload_mbps: 0,
+            bytes_rx_formateado: '0 B',
+            bytes_tx_formateado: '0 B',
+            timestamp: '--:--:--'
+        },
+
+        init() {
+            // Cargar listado de clientes del router activo
+            this.cargarClientes();
+
+            // Escuchar cambios de router global
+            window.addEventListener('router-changed', (e) => {
+                this.cargarClientes(e.detail?.routerId);
+            });
+
+            // Listener de cambio de tema
+            window.clientMonitorUpdateTheme = () => {
+                if (!this.chart) return;
+                const isDark = document.documentElement.classList.contains('dark');
+                this.chart.options.scales.x.grid.color = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)';
+                this.chart.options.scales.x.ticks.color = isDark ? '#94a3b8' : '#64748b';
+                this.chart.options.scales.y.grid.color = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)';
+                this.chart.options.scales.y.ticks.color = isDark ? '#94a3b8' : '#64748b';
+                this.chart.options.plugins.legend.labels.color = isDark ? '#cbd5e1' : '#334155';
+                this.chart.update('none');
+            };
+        },
+
+        cargarClientes(routerId = null) {
+            const url = routerId 
+                ? `/api/monitoreo/clientes-activos?router_id=${routerId}`
+                : '/api/monitoreo/clientes-activos';
+            fetch(url)
+                .then(r => r.json())
+                .then(data => { 
+                    this.listaClientes = data.clientes || []; 
+                    if (this.clienteSeleccionadoId && !this.listaClientes.some(c => c.id == this.clienteSeleccionadoId)) {
+                        this.limpiarMonitoreo();
+                    }
+                })
+                .catch(e => console.error('Error cargando clientes:', e));
+        },
+
+        get clientesFiltrados() {
+            if (!this.filtroBusqueda.trim()) return this.listaClientes;
+            const q = this.filtroBusqueda.toLowerCase();
+            return this.listaClientes.filter(c => 
+                (c.nombre && c.nombre.toLowerCase().includes(q)) || 
+                (c.ip && c.ip.toLowerCase().includes(q)) ||
+                (c.plan && c.plan.toLowerCase().includes(q))
+            );
+        },
+
+        limpiarMonitoreo() {
+            if (this.intervalo) clearInterval(this.intervalo);
+            this.intervalo = null;
+            this.clienteSeleccionadoId = '';
+            this.clienteActual = {};
+            this.traficoActual = { 
+                download_formateado: '0 bps', 
+                upload_formateado: '0 bps',
+                download_mbps: 0,
+                upload_mbps: 0,
+                bytes_rx_formateado: '0 B',
+                bytes_tx_formateado: '0 B',
+                timestamp: '--:--:--'
+            };
+            if (this.chart) {
+                this.chart.destroy();
+                this.chart = null;
+                window.clientMonitorChart = null;
+            }
+        },
+
+        cambiarCliente() {
+            if (this.intervalo) clearInterval(this.intervalo);
+            this.intervalo = null;
+
+            if (!this.clienteSeleccionadoId) {
+                this.limpiarMonitoreo();
+                return;
+            }
+
+            this.clienteActual = this.listaClientes.find(c => c.id == this.clienteSeleccionadoId) || {};
+            
+            this.$nextTick(() => {
+                this.inicializarGrafico();
+                this.consultarTrafico();
+
+                // Sondeo continuo en vivo cada 1.8 segundos
+                this.intervalo = setInterval(() => {
+                    this.consultarTrafico();
+                }, 1800);
+            });
+        },
+
+        consultarTrafico() {
+            if (!this.clienteSeleccionadoId) return;
+            fetch(`/api/monitoreo/cliente/${this.clienteSeleccionadoId}/trafico`)
+                .then(r => r.json())
+                .then(res => {
+                    if (res.success) {
+                        this.traficoActual = res;
+                        this.actualizarGrafico(res.download_mbps, res.upload_mbps);
+                    }
+                })
+                .catch(e => console.error('Error consultando tráfico:', e));
+        },
+
+        inicializarGrafico() {
+            const canvas = document.getElementById('chartClienteTrafico');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+            if (this.chart) this.chart.destroy();
+
+            const isDark = document.documentElement.classList.contains('dark');
+
+            this.chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: Array(20).fill(''),
+                    datasets: [
+                        {
+                            label: 'Descarga RX (Mbps)',
+                            borderColor: '#06b6d4',
+                            backgroundColor: 'rgba(6, 182, 212, 0.18)',
+                            borderWidth: 2,
+                            fill: true,
+                            data: Array(20).fill(0),
+                            tension: 0.35,
+                            pointRadius: 1,
+                            pointHoverRadius: 4,
+                            pointBackgroundColor: '#06b6d4'
+                        },
+                        {
+                            label: 'Subida TX (Mbps)',
+                            borderColor: '#6366f1',
+                            backgroundColor: 'rgba(99, 102, 241, 0.12)',
+                            borderWidth: 2,
+                            fill: true,
+                            data: Array(20).fill(0),
+                            tension: 0.35,
+                            pointRadius: 1,
+                            pointHoverRadius: 4,
+                            pointBackgroundColor: '#6366f1'
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    scales: {
+                        x: {
+                            grid: { color: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' },
+                            ticks: { font: { family: 'JetBrains Mono', size: 10 }, color: isDark ? '#94a3b8' : '#64748b', maxRotation: 0 }
+                        },
+                        y: { 
+                            beginAtZero: true, 
+                            title: { display: true, text: 'Mbps', color: isDark ? '#94a3b8' : '#64748b', font: { family: 'JetBrains Mono', size: 11 } },
+                            grid: { color: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' },
+                            ticks: { 
+                                font: { family: 'JetBrains Mono', size: 10 }, 
+                                color: isDark ? '#94a3b8' : '#64748b',
+                                callback: function(value) { return value + ' Mbps'; }
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'top',
+                            labels: {
+                                color: isDark ? '#cbd5e1' : '#334155',
+                                font: { family: 'JetBrains Mono', size: 11 }
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return `${context.dataset.label}: ${context.parsed.y.toFixed(2)} Mbps`;
+                                }
+                            }
+                        }
+                    },
+                    animation: false
+                }
+            });
+            window.clientMonitorChart = this.chart;
+        },
+
+        actualizarGrafico(dwMbps, upMbps) {
+            if (!this.chart) return;
+            this.chart.data.labels.shift();
+            this.chart.data.labels.push(new Date().toLocaleTimeString());
+            
+            this.chart.data.datasets[0].data.shift();
+            this.chart.data.datasets[0].data.push(dwMbps);
+
+            this.chart.data.datasets[1].data.shift();
+            this.chart.data.datasets[1].data.push(upMbps);
+
+            this.chart.update('none');
+        }
+    };
+}
+
 </script>
 @endpush
